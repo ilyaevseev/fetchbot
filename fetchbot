@@ -1,0 +1,161 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use AnyEvent::HTTP;
+use Time::HiRes qw(gettimeofday tv_interval);
+use POSIX qw(strftime);
+use Data::Dumper;
+
+my $cv = AnyEvent->condvar;   # $cv->send() finishes main loop
+my $timer;
+
+
+################################################################
+#
+#  Globals
+
+my $verbose;
+my $request_delay = 0.5;
+my $urls_file;
+
+my @urls;
+my $requests_count = 0;
+my $responses_count = 0;
+my $errors_count = 0;
+my $finished_count = 0;
+my $need_finish;
+my $tstart = [gettimeofday];
+
+
+################################################################
+#
+#  Routines
+
+sub Die { die "Error: @_\nUsage: $0 --help\n" }
+
+sub tsay {
+	my ($secs, $msecs) = Time::HiRes::gettimeofday();
+	my $t = strftime("%Y.%m.%d %H:%M:%S",localtime($secs));
+	printf "%s.%06d -- @_\n", $t, $msecs;
+}
+
+sub usage {
+	print "Usage: $0 [args..] urls_file\n",
+	      "Args:\n",
+	      "    -v, --verbose\n",
+	      "    -h, --help\n",
+	      "    -D, --delay VALUE\n",
+	      "";
+	exit;
+}
+
+sub parse_cmdline() {
+	usage if !@ARGV;
+	while(@ARGV) {
+		my $s = shift @ARGV;
+		if ($s eq '--verbose' or $s eq '-v') {
+			$verbose = 1;
+		} elsif ($s eq '--help' or $s eq '--usage' or $s eq '-h') {
+			usage();
+		} elsif ($s eq '--delay' or $s eq '-D') {
+			Die "missing average delay" unless @ARGV;
+			$request_delay = shift @ARGV;
+		} elsif ($s =~ /^-/) {
+			Die "wrong command line key $s";
+		} elsif ($urls_file) {
+			Die "duplicate URLs file: $urls_file, $s";
+		} else {
+			$urls_file = $s;
+		}
+	}
+	Die "missing URLs file"         unless $urls_file;
+	Die "wrong average delay value" unless $request_delay > 0;
+}
+
+sub read_urls() {
+	open F, $urls_file or die "Cannot read $urls_file: $!\n";
+	@urls = grep { !/^\s*#/ and !/^\s*$/ } <F>;
+	chomp @urls;
+	close F;
+	#print $_,".\n" foreach @urls; exit;  # ..debugging
+	Die "no URLs in $urls_file" unless @urls;
+	tsay "Readed ".(scalar @urls)." urls.";
+}
+
+sub init_timer() {
+	$timer = AnyEvent->timer(
+		after => $request_delay,
+		   cb => \&init_download,
+	);
+}
+
+sub download_finished($$$) {
+	my ($data, $headers, $request) = @_;
+	print "\n";
+	tsay "======= Response ========";
+	tsay "Elapsed ".tv_interval($request->{Timestamp})." seconds.";
+	foreach (sort keys %$headers) {
+		my $v = $headers->{$_};
+		tsay "$_ = ".(ref($v) ? Dumper($v) : $v);
+	}
+	if (defined $data) {
+		tsay "Data length = ".length($data);
+#		print $data,"\n";
+	} else {
+		tsay "Data empty.";
+	}
+	print "\n";
+
+	($headers->{Status} =~ /^2/) ? ++$responses_count : ++$errors_count;
+
+	$cv->send if ++$finished_count >= $requests_count and $need_finish;
+
+#	if ($headers->{Status} =~ /^2/) {
+#		# ok
+#	} else {
+#		print "error, $hdr->{Status} $hdr->{Reason}\n";
+#	}
+	# ???
+}
+
+sub init_download() {
+	return $need_finish = 1 unless @urls;
+
+	my $url = shift @urls;
+	tsay "Request $requests_count: $url";
+
+	# Additional callback params..
+	my $tstamp = [gettimeofday];
+	my $index = $requests_count++;
+
+	http_get($url, sub {
+		download_finished(shift, shift, {
+			Index => $index,
+			Timestamp => $tstamp,
+			URL => $url,
+		} );
+	} );
+
+	init_timer();   # ..try delayed start of next downloading
+}
+
+
+################################################################
+#
+#  Main routine
+
+parse_cmdline();
+read_urls();
+init_download();
+
+tsay "Waiting for finish...";
+$cv->recv;
+tsay "Mainloop finished.";
+
+printf "Done. Elapsed %.2f seconds. Total %d requests, %d responses, %d errors.\n",
+	tv_interval($tstart),
+	$requests_count, $responses_count, $errors_count;
+
+__END__
