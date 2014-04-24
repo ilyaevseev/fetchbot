@@ -84,7 +84,7 @@ sub read_urls() {
 	tsay "Readed ".(scalar @urls)." urls.";
 }
 
-sub init_timer() {
+sub init_timer() {                  # ..try delayed start of next downloading
 	$timer = AnyEvent->timer(
 		after => $request_delay,
 		   cb => \&init_download,
@@ -121,8 +121,6 @@ sub download_finished($$$) {
 }
 
 sub init_download() {
-	return $need_finish = 1 unless @urls;
-
 	my $url = shift @urls;
 	tsay "Request $requests_count: $url";
 
@@ -138,7 +136,7 @@ sub init_download() {
 		} );
 	} );
 
-	init_timer();   # ..try delayed start of next downloading
+	@urls ? init_timer() : ($need_finish = 1);
 }
 
 
@@ -150,7 +148,7 @@ parse_cmdline();
 read_urls();
 init_download();
 
-tsay "Waiting for finish...";
+tsay "Mainloop started...";
 $cv->recv;
 tsay "Mainloop finished.";
 
